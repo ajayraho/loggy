@@ -1,24 +1,26 @@
 import json
 import time
 import psycopg2
-import redis # Changed from kafka
+import redis
 import os
+import threading
+from fastapi import FastAPI 
 
-DB_NAME = os.environ.get("POSTGRES_DB", "logdb")
-DB_USER = os.environ.get("POSTGRES_USER", "user")
-DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "password")
-DB_HOST = os.environ.get("DB_HOST", "localhost")
-DB_PORT = os.environ.get("DB_PORT", "5432")
+app = FastAPI()
 
+DB_URL = os.environ.get('DATABASE_URL')
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+
+@app.get("/")
+def health_check():
+    return {"status": "Consumer is running."}
+
 
 def connect_to_db():
     """Establishes a connection to the PostgreSQL database."""
     while True:
         try:
-            conn = psycopg2.connect(
-                dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
-            )
+            conn = psycopg2.connect(DB_URL)
             print("Successfully connected to the database.")
             return conn
         except psycopg2.OperationalError as e:
@@ -50,28 +52,22 @@ def insert_log(conn, log_data):
         ))
         conn.commit()
 
-def consume_messages(conn):
-    """Connects to Redis, subscribes to a channel, and processes messages."""
+def consume_and_process():
+    """The main background task for consuming messages."""
+    db_connection = connect_to_db()
+    create_table(db_connection)
+    
     r = redis.Redis.from_url(REDIS_URL)
     pubsub = r.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe("log-channel")
-    print("Consumer started. Subscribed to 'log-channel' in Redis.")
+    print("Consumer thread started. Subscribed to 'log-channel' in Redis.")
 
     for message in pubsub.listen():
         log_data_str = message['data'].decode('utf-8')
         log_data = json.loads(log_data_str)
-        insert_log(conn, log_data)
+        insert_log(db_connection, log_data)
         print(f"Logged event with status code: {log_data.get('status_code')}")
 
-if __name__ == "__main__":
-    db_connection = connect_to_db()
-    create_table(db_connection)
-    
-    try:
-        consume_messages(db_connection)
-    except KeyboardInterrupt:
-        print("\nConsumer stopped.")
-    finally:
-        if db_connection:
-            db_connection.close()
-            print("Database connection closed.")
+
+consumer_thread = threading.Thread(target=consume_and_process, daemon=True)
+consumer_thread.start()
